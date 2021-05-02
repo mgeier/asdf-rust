@@ -15,10 +15,12 @@ pub enum State {
     Seeking(u64),
 }
 
+type DataConsumer = rtrb::fixed_chunks::FixedChunkConsumer<f32>;
+
 pub struct FileStreamer {
-    ready_consumer: rtrb::Consumer<(u64, rtrb::Consumer<f32>)>,
-    seek_producer: rtrb::Producer<(u64, rtrb::Consumer<f32>)>,
-    data_consumer: Option<rtrb::Consumer<f32>>,
+    ready_consumer: rtrb::Consumer<(u64, DataConsumer)>,
+    seek_producer: rtrb::Producer<(u64, DataConsumer)>,
+    data_consumer: Option<DataConsumer>,
     reader_thread: Option<thread::JoinHandle<Result<(), BoxedError>>>,
     reader_thread_keep_reading: Arc<AtomicBool>,
     channels: u32,
@@ -57,11 +59,12 @@ impl FileStreamer {
         sleeptime: Duration,
     ) -> FileStreamer {
         let chunksize = blocksize as usize * channels as usize;
-        let (mut ready_producer, ready_consumer) = rtrb::RingBuffer::new(1).split();
-        let (seek_producer, mut seek_consumer) =
-            rtrb::RingBuffer::<(u64, rtrb::Consumer<f32>)>::new(1).split();
-        let (mut data_producer, data_consumer) =
-            rtrb::RingBuffer::with_chunks(buffer_blocks as usize, chunksize as usize).split();
+        let (mut ready_producer, ready_consumer) = rtrb::RingBuffer::new(1);
+        let (seek_producer, mut seek_consumer) = rtrb::RingBuffer::<(u64, DataConsumer)>::new(1);
+        let (data_producer, data_consumer) =
+            rtrb::RingBuffer::new(buffer_blocks as usize * chunksize as usize);
+        let mut data_producer = data_producer.try_fixed_chunk_size(chunksize).unwrap();
+        let data_consumer = data_consumer.try_fixed_chunk_size(chunksize).unwrap();
 
         let reader_thread_keep_reading = Arc::new(AtomicBool::new(true));
         let keep_reading = Arc::clone(&reader_thread_keep_reading);
@@ -73,17 +76,15 @@ impl FileStreamer {
 
             while keep_reading.load(Ordering::Acquire) {
                 if let Ok((frame, mut queue)) = seek_consumer.pop() {
-                    rtrb::RingBuffer::reset(&mut data_producer, &mut queue);
+                    // NB: By owning data_producer, we know that no new items can be written while
+                    //     we drain the consumer:
+                    while let Ok(_) = queue.pop_chunk() {}
                     data_consumer = Some(queue);
                     current_frame = frame;
                     seek_frame = frame;
                 }
-                if let Ok(mut chunk) = data_producer.write_chunk(chunksize) {
-                    let target = {
-                        let (first, second) = chunk.as_mut_slices();
-                        debug_assert!(second.is_empty());
-                        sos.from_iter_mut(first.chunks_mut(blocksize as usize))
-                    };
+                if let Ok(mut chunk) = data_producer.push_chunk() {
+                    let target = sos.from_iter_mut(chunk.chunks_mut(blocksize as usize));
                     debug_assert_eq!(target.len(), channels as usize);
 
                     // NB: Slice from RingBuffer is already filled with zeros
@@ -110,7 +111,7 @@ impl FileStreamer {
                     current_frame += u64::from(blocksize);
 
                     // Make sure the block is queued before data_consumer is sent
-                    chunk.commit_all();
+                    drop(chunk);
 
                     if current_frame - seek_frame >= u64::from(buffer_blocks) * u64::from(blocksize)
                     {
@@ -153,13 +154,8 @@ impl FileStreamer {
         if !rolling && !previously {
             fill_with_zeros(target);
         } else if let Some(ref mut queue) = self.data_consumer {
-            let chunksize = self.blocksize as usize * self.channels as usize;
-            if let Ok(chunk) = queue.read_chunk(chunksize) {
-                let source = {
-                    let (first, second) = chunk.as_slices();
-                    debug_assert!(second.is_empty());
-                    self.sos.from_iter(first.chunks(self.blocksize as usize))
-                };
+            if let Ok(chunk) = queue.pop_chunk() {
+                let source = self.sos.from_iter(chunk.chunks(self.blocksize as usize));
                 debug_assert_eq!(source.len(), self.channels as usize);
                 for (source, target) in source.iter().zip(target) {
                     if rolling && !previously {
@@ -179,7 +175,6 @@ impl FileStreamer {
                         target.copy_from_slice(source);
                     };
                 }
-                chunk.commit_all();
                 if let State::Playing(f) = self.state {
                     self.state = State::Playing(f + self.blocksize as u64);
                 }
