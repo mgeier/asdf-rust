@@ -78,7 +78,7 @@ impl FileStreamer {
                 if let Ok((frame, mut queue)) = seek_consumer.pop() {
                     // NB: By owning data_producer, we know that no new items can be written while
                     //     we drain the consumer:
-                    while let Ok(_) = queue.pop_chunk() {}
+                    while queue.pop_chunk().is_ok() {}
                     data_consumer = Some(queue);
                     current_frame = frame;
                     seek_frame = frame;
