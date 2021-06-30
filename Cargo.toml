@@ -32,3 +32,6 @@ thiserror = "1.0"
 vorbis-sys = "0.1"
 vorbisfile-sys = "*"
 xmlparser = "0.12"
+
+[patch.crates-io]
+rtrb = { path = '../rtrb' }
