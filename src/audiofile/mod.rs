@@ -139,18 +139,12 @@ where
     type Block = F::Block;
 
     fn next_block(&mut self, max_frames: u32) -> Result<&mut Self::Block, BoxedError> {
-        // This is an ugly work-around that can be removed once Polonius is stabilized.
-        // http://smallcultfollowing.com/babysteps/blog/2018/06/15/mir-based-borrow-check-nll-status-update/#polonius
-        // TODO: remove this pointer ugliness:
-        let ptr = &mut self.file as *mut _;
-        let file: &mut F = unsafe { &mut *ptr };
-        let block = file.next_block(max_frames)?;
+        let block = self.file.next_block(max_frames)?;
         if block.frames() > 0 || self.current_iteration >= (self.iterations.get() - 1) {
             return Ok(block);
         }
-        let file: &mut F = unsafe { &mut *ptr };
-        file.seek(0)?;
+        self.file.seek(0)?;
         self.current_iteration += 1;
-        file.next_block(max_frames)
+        self.file.next_block(max_frames)
     }
 }
