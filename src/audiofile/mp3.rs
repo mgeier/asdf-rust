@@ -13,6 +13,7 @@ pub struct File<R> {
     #[allow(dead_code)]
     reader: Box<R>,
     decoder: ffi::mp3dec_ex_t,
+    frame_info: ffi::mp3dec_frame_info_t,
     current_block: Block,
 }
 
@@ -81,9 +82,12 @@ where
         }
         let decoder = unsafe { decoder.assume_init() };
         let channels = decoder.info.channels as u32;
+        let frame_info = MaybeUninit::<ffi::mp3dec_frame_info_t>::zeroed();
+        let frame_info = unsafe { frame_info.assume_init() };
         Ok(File {
             reader,
             decoder,
+            frame_info,
             current_block: Block {
                 ptr: std::ptr::null_mut(),
                 frames: 0,
@@ -136,6 +140,7 @@ where
             ffi::mp3dec_ex_read_frame(
                 &mut self.decoder,
                 &mut self.current_block.ptr,
+                &mut self.frame_info,
                 (max_frames * self.channels()) as usize,
             ) as u32
         };
